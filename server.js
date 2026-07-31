@@ -6,7 +6,12 @@ const redis = require('redis');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { maxHttpBufferSize: 1e8 }); // Limite aumentado para 100MB
+
+// Aumenta o limite de JSON para aceitar arquivos em Base64 grandes
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.static('public'));
 
 // Variáveis de Ambiente
 const EVOLUTION_URL = process.env.EVOLUTION_URL;
@@ -22,49 +27,37 @@ const pool = new Pool({
     port: process.env.POSTGRES_PORT || 5432,
 });
 
-// Garante que a tabela existe
-pool.query(`
-    CREATE TABLE IF NOT EXISTS mensagens (
-        id SERIAL PRIMARY KEY,
-        remote_jid VARCHAR(100),
-        push_name VARCHAR(100),
-        texto TEXT,
-        from_me BOOLEAN,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-`).then(() => console.log('✅ Tabela do Postgres verificada')).catch(console.error);
-
 // Configuração do Redis
 const redisClient = redis.createClient({ url: `redis://${process.env.REDIS_HOST}:6379` });
 redisClient.on('error', (err) => console.error('Erro no Redis', err));
 redisClient.connect().then(() => console.log('✅ Redis conectado'));
 
-app.use(express.json());
-app.use(express.static('public'));
-
-// Função para buscar contatos preservando o NOME REAL do cliente
+// Busca lista de contatos
 async function buscarListaContatos() {
     const query = `
-        SELECT DISTINCT ON (m.remote_jid) 
-            m.remote_jid, 
-            COALESCE(c.push_name, split_part(m.remote_jid, '@', 1)) AS push_name, 
-            m.texto AS ultima_mensagem, 
-            m.criado_em
+        SELECT 
+            m.remote_jid,
+            COALESCE(
+                (SELECT push_name FROM mensagens WHERE remote_jid = m.remote_jid AND from_me = false AND push_name IS NOT NULL AND push_name != 'Você' ORDER BY criado_em DESC LIMIT 1),
+                split_part(m.remote_jid, '@', 1)
+            ) AS push_name,
+            m.texto AS ultima_mensagem,
+            m.media_type,
+            m.criado_em,
+            (SELECT COUNT(*) FROM mensagens WHERE remote_jid = m.remote_jid AND lida = false AND from_me = false) AS nao_lidas
         FROM mensagens m
-        LEFT JOIN (
-            -- Busca o nome do cliente registrado nas mensagens recebidas
-            SELECT DISTINCT ON (remote_jid) remote_jid, push_name 
-            FROM mensagens 
-            WHERE from_me = false AND push_name IS NOT NULL AND push_name != 'Você'
-            ORDER BY remote_jid, criado_em DESC
-        ) c ON m.remote_jid = c.remote_jid
-        ORDER BY m.remote_jid, m.criado_em DESC
+        INNER JOIN (
+            SELECT remote_jid, MAX(criado_em) AS max_criado
+            FROM mensagens
+            GROUP BY remote_jid
+        ) ultimas ON m.remote_jid = ultimas.remote_jid AND m.criado_em = ultimas.max_criado
+        ORDER BY m.criado_em DESC;
     `;
     const res = await pool.query(query);
-    return res.rows.sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em));
+    return res.rows;
 }
 
-// Webhook para RECEBER mensagens
+// Webhook para RECEBER mensagens da Evolution API
 app.post('/webhook', async (req, res) => {
     const data = req.body;
     
@@ -72,17 +65,36 @@ app.post('/webhook', async (req, res) => {
         const msg = data.data;
         
         if (!msg.key.fromMe) {
+            const text = msg.message?.conversation || 
+                         msg.message?.extendedTextMessage?.text || 
+                         msg.message?.imageMessage?.caption || 
+                         msg.message?.documentMessage?.caption || 
+                         '';
+
+            let mediaUrl = null;
+            let mediaType = null;
+
+            if (msg.message?.imageMessage) {
+                mediaType = 'image';
+                mediaUrl = msg.message.imageMessage.url || null;
+            } else if (msg.message?.documentMessage) {
+                mediaType = 'document';
+                mediaUrl = msg.message.documentMessage.url || null;
+            }
+
             const payload = {
                 remoteJid: msg.key.remoteJid,
                 pushName: msg.pushName || 'Cliente',
-                text: msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Mensagem sem texto',
-                fromMe: false
+                text: text || (mediaType === 'image' ? '📷 Imagem' : mediaType === 'document' ? '📄 Documento' : 'Mensagem sem texto'),
+                mediaUrl,
+                mediaType,
+                fromMe: false,
+                lida: false
             };
 
-            // Salva a mensagem recebida com o nome real do cliente
             await pool.query(
-                'INSERT INTO mensagens (remote_jid, push_name, texto, from_me) VALUES ($1, $2, $3, $4)',
-                [payload.remoteJid, payload.pushName, payload.text, payload.fromMe]
+                'INSERT INTO mensagens (remote_jid, push_name, texto, media_url, media_type, from_me, lida) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                [payload.remoteJid, payload.pushName, payload.text, payload.mediaUrl, payload.mediaType, payload.fromMe, payload.lida]
             );
 
             io.emit('nova_mensagem', payload);
@@ -94,7 +106,67 @@ app.post('/webhook', async (req, res) => {
     return res.status(200).json({ status: 'success' });
 });
 
-// Socket.io
+// ROTA HTTP DEDICADA PARA ENVIAR MENSAGEM / MÍDIA (Evita travar o Socket)
+app.post('/api/enviar-mensagem', async (req, res) => {
+    const { remoteJid, text, mediaBase64, mediaType, fileName } = req.body;
+
+    try {
+        let endpoint = `${EVOLUTION_URL}/message/sendText/${INSTANCE_NAME}`;
+        let bodyData = { number: remoteJid, text: text || '' };
+
+        if (mediaBase64) {
+            endpoint = `${EVOLUTION_URL}/message/sendMedia/${INSTANCE_NAME}`;
+            const base64Pura = mediaBase64.includes(',') ? mediaBase64.split(',')[1] : mediaBase64;
+
+            bodyData = {
+                number: remoteJid,
+                media: base64Pura,
+                mediatype: mediaType === 'image' ? 'image' : 'document',
+                fileName: fileName || 'arquivo',
+                caption: text || ''
+            };
+        }
+
+        console.log(`📡 Disparando para Evolution API (${endpoint})...`);
+
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+            body: JSON.stringify(bodyData)
+        });
+
+        const responseData = await response.json();
+
+        if (response.ok) {
+            const nomeContatoRes = await pool.query(
+                "SELECT push_name FROM mensagens WHERE remote_jid = $1 AND from_me = false ORDER BY criado_em DESC LIMIT 1",
+                [remoteJid]
+            );
+            const nomeContato = nomeContatoRes.rows[0]?.push_name || remoteJid.split('@')[0];
+
+            await pool.query(
+                'INSERT INTO mensagens (remote_jid, push_name, texto, media_url, media_type, from_me, lida) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                [remoteJid, nomeContato, text || (mediaType === 'image' ? '📷 Imagem' : '📄 Documento'), mediaBase64, mediaType, true, true]
+            );
+
+            const msgPayload = { remoteJid, text, mediaUrl: mediaBase64, mediaType, fromMe: true };
+            io.emit('mensagem_enviada', msgPayload);
+
+            const contatos = await buscarListaContatos();
+            io.emit('lista_contatos', contatos);
+
+            return res.json({ success: true });
+        } else {
+            console.error('❌ Erro na Evolution API:', responseData);
+            return res.status(400).json({ error: responseData });
+        }
+    } catch (error) {
+        console.error('❌ Erro Interno ao enviar:', error);
+        return res.status(500).json({ error: error.message });
+    }
+});
+
+// Socket.io para leituras e eventos em tempo real
 io.on('connection', async (socket) => {
     console.log('Atendente conectado:', socket.id);
 
@@ -107,49 +179,22 @@ io.on('connection', async (socket) => {
 
     socket.on('carregar_conversa', async (remoteJid) => {
         try {
+            await pool.query(
+                'UPDATE mensagens SET lida = TRUE WHERE remote_jid = $1 AND from_me = FALSE',
+                [remoteJid]
+            );
+
             const historico = await pool.query(
                 'SELECT * FROM mensagens WHERE remote_jid = $1 ORDER BY criado_em ASC',
                 [remoteJid]
             );
+            
             socket.emit('historico_conversa', { remoteJid, mensagens: historico.rows });
+
+            const contatos = await buscarListaContatos();
+            io.emit('lista_contatos', contatos);
         } catch (err) {
             console.error('Erro ao carregar conversa:', err);
-        }
-    });
-
-    // Quando o atendente ENVIA uma mensagem
-    socket.on('enviar_mensagem', async (dados) => {
-        const { remoteJid, text } = dados;
-
-        try {
-            const response = await fetch(`${EVOLUTION_URL}/message/sendText/${INSTANCE_NAME}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
-                body: JSON.stringify({ number: remoteJid, text: text })
-            });
-
-            if (response.ok) {
-                // Busca se já existe um nome cadastrado para esse contato
-                const nomeContatoRes = await pool.query(
-                    "SELECT push_name FROM mensagens WHERE remote_jid = $1 AND from_me = false ORDER BY criado_em DESC LIMIT 1",
-                    [remoteJid]
-                );
-                
-                const nomeContato = nomeContatoRes.rows[0]?.push_name || remoteJid.split('@')[0];
-
-                // Salva a mensagem enviada preservando o NOME DO CONTATO
-                await pool.query(
-                    'INSERT INTO mensagens (remote_jid, push_name, texto, from_me) VALUES ($1, $2, $3, $4)',
-                    [remoteJid, nomeContato, text, true]
-                );
-
-                socket.emit('mensagem_enviada', { remoteJid, text, fromMe: true });
-
-                const contatos = await buscarListaContatos();
-                io.emit('lista_contatos', contatos);
-            }
-        } catch (error) {
-            console.error('Erro ao enviar mensagem:', error);
         }
     });
 });
