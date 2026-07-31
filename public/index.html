@@ -1,43 +1,67 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Meu Chat Próprio</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel de Atendimento WhatsApp</title>
     <style>
-        body { font-family: Arial, sans-serif; background: #ece5dd; padding: 20px; }
-        #chat-box { width: 400px; height: 500px; background: white; border-radius: 8px; padding: 15px; overflow-y: auto; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
-        .balao { background: #dcf8c6; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; width: fit-content; max-width: 80%; }
-        .cliente { font-weight: bold; color: #075e54; font-size: 12px; }
-        .texto { font-size: 14px; margin-top: 3px; }
+        body { font-family: Arial, sans-serif; background: #f4f4f9; margin: 0; padding: 20px; }
+        .chat-container { max-width: 600px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 20px; }
+        .messages { height: 350px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; border-radius: 5px; margin-bottom: 15px; }
+        .msg { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 75%; }
+        .recebida { background: #e1ffc7; align-self: flex-start; }
+        .enviada { background: #0084ff; color: #fff; margin-left: auto; text-align: right; }
+        .form-send { display: flex; flex-direction: column; gap: 10px; }
+        input, button { padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+        button { background: #25d366; color: white; border: none; font-weight: bold; cursor: pointer; }
+        button:hover { background: #1ebd56; }
     </style>
 </head>
 <body>
 
-    <h2>Painel do Atendente</h2>
-    <div id="chat-box"></div>
+    <div class="chat-container">
+        <h2>Atendimento WhatsApp</h2>
+        <div id="messages" class="messages"></div>
 
-    <!-- Carrega a biblioteca cliente do Socket.io -->
+        <div class="form-send">
+            <input type="text" id="remoteJid" placeholder="Número do cliente (Ex: 5511999999999)" />
+            <input type="text" id="texto" placeholder="Digite sua mensagem..." />
+            <button onclick="enviar()">Enviar Mensagem</button>
+        </div>
+    </div>
+
     <script src="/socket.io/socket.io.js"></script>
     <script>
-        // Conecta no servidor WebSocket
         const socket = io();
+        const messagesDiv = document.getElementById('messages');
 
-        // Escuta o evento 'nova_mensagem' que o server.js envia
-        socket.on('nova_mensagem', function(dados) {
-            const chatBox = document.getElementById('chat-box');
-
-            // Cria o balãozinho verde na tela
-            const novoBalao = document.createElement('div');
-            novoBalao.className = 'balao';
-            novoBalao.innerHTML = `
-                <div class="cliente">${dados.cliente || 'Desconhecido'}</div>
-                <div class="texto">${dados.texto || dados.msg || 'Sem texto'}</div>
-            `;
-
-            // Adiciona no chat e rola para baixo
-            chatBox.appendChild(novoBalao);
-            chatBox.scrollTop = chatBox.scrollHeight;
+        // Recebe mensagem enviada pelo cliente via Webhook
+        socket.on('nova_mensagem', (msg) => {
+            adicionarMensagemOnScreen(`${msg.pushName}: ${msg.text}`, 'recebida');
+            // Preenche o campo de número automaticamente para facilitar a resposta
+            document.getElementById('remoteJid').value = msg.remoteJid;
         });
+
+        // Recebe confirmação da mensagem que o atendente enviou
+        socket.on('mensagem_enviada', (msg) => {
+            adicionarMensagemOnScreen(`Você: ${msg.text}`, 'enviada');
+        });
+
+        function enviar() {
+            const remoteJid = document.getElementById('remoteJid').value;
+            const text = document.getElementById('texto').value;
+
+            if (!remoteJid || !text) {
+                alert('Preencha o número e a mensagem!');
+                return;
+            }
+
+            // Dispara para o backend via WebSockets
+            socket.emit('enviar_mensagem', { remoteJid, text });
+            
+            // Limpa o campo de texto
+            document.getElementById('texto').value = '';
+        }
     </script>
 </body>
 </html>

@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   chat-app:
     build: .
     container_name: meu-chat-whatsapp
     ports:
       - "3002:3002"
-    environment:
-      - PORT=3002
+    env_file:
+      - .env
     restart: always

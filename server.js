@@ -6,48 +6,78 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Permite ler JSONs do Webhook
-app.use(express.json());
+// O Node.js lê automaticamente do .env ou do container Docker
+const EVOLUTION_URL = process.env.EVOLUTION_URL;
+const API_KEY = process.env.API_KEY; 
+const INSTANCE_NAME = process.env.INSTANCE_NAME;
 
-// Serve os arquivos da pasta 'public' (onde fica a tela HTML)
+app.use(express.json());
 app.use(express.static('public'));
 
-// Rota do Webhook com tratamento para o JSON da Evolution API
+// Webhook para RECEBER mensagens do WhatsApp
 app.post('/webhook', (req, res) => {
-    const body = req.body;
+    const data = req.body;
+    
+    // Verifica se é uma mensagem recebida
+    if (data.event === 'messages.upsert') {
+        const msg = data.data;
+        
+        // Garante que não é mensagem enviada por você mesmo via celular
+        if (!msg.key.fromMe) {
+            const payload = {
+                id: msg.key.id,
+                remoteJid: msg.key.remoteJid,
+                pushName: msg.pushName || 'Cliente',
+                text: msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Mensagem sem texto',
+                fromMe: false
+            };
 
-    console.log('\n--- NOVA MENSAGEM DO WHATSAPP ---');
+            // Envia para o HTML via Socket.io
+            io.emit('nova_mensagem', payload);
+        }
+    }
 
-    // 1. Extrai o nome do contato (ou o número de telefone se não tiver nome)
-    const nomeCliente = body.data?.pushName 
-        || body.data?.key?.remoteJid?.replace(/\D/g, '') 
-        || 'Cliente';
-
-    // 2. Extrai o texto da mensagem (trata texto simples e mensagens com resposta)
-    const textoMensagem = body.data?.message?.conversation 
-        || body.data?.message?.extendedTextMessage?.text 
-        || 'Mensagem sem texto (Mídia/Sticker)';
-
-    // Objeto formatado para o nosso Frontend
-    const mensagemTratada = {
-        cliente: nomeCliente,
-        texto: textoMensagem
-    };
-
-    console.log(`De: ${mensagemTratada.cliente} | Texto: ${mensagemTratada.texto}`);
-
-    // Dispara para a tela em tempo real via Socket.io
-    io.emit('nova_mensagem', mensagemTratada);
-
-    res.status(200).send('OK');
+    return res.status(200).json({ status: 'success' });
 });
 
-// Evento quando o navegador se conecta
+// Socket.io para ENVIAR mensagens do Painel -> Evolution API -> WhatsApp
 io.on('connection', (socket) => {
-    console.log('Um atendente/tela se conectou no sistema!');
+    console.log('Atendente conectado no painel:', socket.id);
+
+    socket.on('enviar_mensagem', async (dados) => {
+        const { remoteJid, text } = dados;
+
+        try {
+            // Envia a mensagem para a Evolution API
+            const response = await fetch(`${EVOLUTION_URL}/message/sendText/${INSTANCE_NAME}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': API_KEY
+                },
+                body: JSON.stringify({
+                    number: remoteJid,
+                    text: text
+                })
+            });
+
+            if (response.ok) {
+                // Desenha a mensagem enviada na tela do atendente
+                socket.emit('mensagem_enviada', {
+                    remoteJid,
+                    text,
+                    fromMe: true
+                });
+            } else {
+                console.error('Erro ao enviar via Evolution API:', await response.text());
+            }
+        } catch (error) {
+            console.error('Erro de conexão com Evolution API:', error);
+        }
+    });
 });
 
-// Liga o servidor
-server.listen(3002, () => {
-    console.log('Servidor de Chat rodando com WebSockets na porta 3002!');
+const PORT = process.env.PORT || 3002;
+server.listen(PORT, () => {
+    console.log(`Servidor de Chat rodando na porta ${PORT}`);
 });
