@@ -13,7 +13,7 @@ const EVOLUTION_URL = process.env.EVOLUTION_URL;
 const API_KEY = process.env.API_KEY; 
 const INSTANCE_NAME = process.env.INSTANCE_NAME; 
 
-// 1. Configuração do Postgres
+// Configuração do Postgres
 const pool = new Pool({
     user: process.env.POSTGRES_USER,
     host: process.env.POSTGRES_HOST,
@@ -22,7 +22,7 @@ const pool = new Pool({
     port: process.env.POSTGRES_PORT || 5432,
 });
 
-// Cria a tabela de mensagens caso não exista
+// Garante que a tabela existe
 pool.query(`
     CREATE TABLE IF NOT EXISTS mensagens (
         id SERIAL PRIMARY KEY,
@@ -34,13 +34,35 @@ pool.query(`
     )
 `).then(() => console.log('✅ Tabela do Postgres verificada')).catch(console.error);
 
-// 2. Configuração do Redis
+// Configuração do Redis
 const redisClient = redis.createClient({ url: `redis://${process.env.REDIS_HOST}:6379` });
 redisClient.on('error', (err) => console.error('Erro no Redis', err));
 redisClient.connect().then(() => console.log('✅ Redis conectado'));
 
 app.use(express.json());
 app.use(express.static('public'));
+
+// Função para buscar contatos preservando o NOME REAL do cliente
+async function buscarListaContatos() {
+    const query = `
+        SELECT DISTINCT ON (m.remote_jid) 
+            m.remote_jid, 
+            COALESCE(c.push_name, split_part(m.remote_jid, '@', 1)) AS push_name, 
+            m.texto AS ultima_mensagem, 
+            m.criado_em
+        FROM mensagens m
+        LEFT JOIN (
+            -- Busca o nome do cliente registrado nas mensagens recebidas
+            SELECT DISTINCT ON (remote_jid) remote_jid, push_name 
+            FROM mensagens 
+            WHERE from_me = false AND push_name IS NOT NULL AND push_name != 'Você'
+            ORDER BY remote_jid, criado_em DESC
+        ) c ON m.remote_jid = c.remote_jid
+        ORDER BY m.remote_jid, m.criado_em DESC
+    `;
+    const res = await pool.query(query);
+    return res.rows.sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em));
+}
 
 // Webhook para RECEBER mensagens
 app.post('/webhook', async (req, res) => {
@@ -57,13 +79,16 @@ app.post('/webhook', async (req, res) => {
                 fromMe: false
             };
 
-            // Salva a mensagem recebida no Postgres
+            // Salva a mensagem recebida com o nome real do cliente
             await pool.query(
                 'INSERT INTO mensagens (remote_jid, push_name, texto, from_me) VALUES ($1, $2, $3, $4)',
                 [payload.remoteJid, payload.pushName, payload.text, payload.fromMe]
             );
 
             io.emit('nova_mensagem', payload);
+
+            const contatos = await buscarListaContatos();
+            io.emit('lista_contatos', contatos);
         }
     }
     return res.status(200).json({ status: 'success' });
@@ -73,13 +98,24 @@ app.post('/webhook', async (req, res) => {
 io.on('connection', async (socket) => {
     console.log('Atendente conectado:', socket.id);
 
-    // Quando o atendente conecta, busca as últimas 50 mensagens do banco e envia para a tela
     try {
-        const historico = await pool.query('SELECT * FROM mensagens ORDER BY criado_em ASC LIMIT 50');
-        socket.emit('historico_mensagens', historico.rows);
-    } catch (error) {
-        console.error('Erro ao buscar histórico:', error);
+        const contatos = await buscarListaContatos();
+        socket.emit('lista_contatos', contatos);
+    } catch (err) {
+        console.error('Erro ao buscar lista de contatos:', err);
     }
+
+    socket.on('carregar_conversa', async (remoteJid) => {
+        try {
+            const historico = await pool.query(
+                'SELECT * FROM mensagens WHERE remote_jid = $1 ORDER BY criado_em ASC',
+                [remoteJid]
+            );
+            socket.emit('historico_conversa', { remoteJid, mensagens: historico.rows });
+        } catch (err) {
+            console.error('Erro ao carregar conversa:', err);
+        }
+    });
 
     // Quando o atendente ENVIA uma mensagem
     socket.on('enviar_mensagem', async (dados) => {
@@ -93,13 +129,24 @@ io.on('connection', async (socket) => {
             });
 
             if (response.ok) {
-                // Salva a mensagem enviada no Postgres
+                // Busca se já existe um nome cadastrado para esse contato
+                const nomeContatoRes = await pool.query(
+                    "SELECT push_name FROM mensagens WHERE remote_jid = $1 AND from_me = false ORDER BY criado_em DESC LIMIT 1",
+                    [remoteJid]
+                );
+                
+                const nomeContato = nomeContatoRes.rows[0]?.push_name || remoteJid.split('@')[0];
+
+                // Salva a mensagem enviada preservando o NOME DO CONTATO
                 await pool.query(
                     'INSERT INTO mensagens (remote_jid, push_name, texto, from_me) VALUES ($1, $2, $3, $4)',
-                    [remoteJid, 'Você', text, true]
+                    [remoteJid, nomeContato, text, true]
                 );
 
                 socket.emit('mensagem_enviada', { remoteJid, text, fromMe: true });
+
+                const contatos = await buscarListaContatos();
+                io.emit('lista_contatos', contatos);
             }
         } catch (error) {
             console.error('Erro ao enviar mensagem:', error);

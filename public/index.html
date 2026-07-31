@@ -3,37 +3,134 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Atendimento WhatsApp</title>
+    <title>Painel WhatsApp - Multiatendimento</title>
     <style>
-        body { font-family: Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }
-        .chat-container { max-width: 600px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 20px; }
-        .messages { height: 350px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; border-radius: 5px; margin-bottom: 15px; background: #fafafa; display: flex; flex-direction: column; gap: 8px; }
-        .msg { padding: 8px 12px; border-radius: 8px; max-width: 75%; word-wrap: break-word; }
-        .recebida { background: #e1ffc7; align-self: flex-start; color: #000; }
-        .enviada { background: #0084ff; color: #fff; align-self: flex-end; text-align: right; }
-        .form-send { display: flex; flex-direction: column; gap: 10px; }
-        input, button { padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
-        button { background: #25d366; color: white; border: none; font-weight: bold; cursor: pointer; }
-        button:hover { background: #1ebd56; }
+        * { box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #e5ddd5; margin: 0; padding: 20px; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        
+        .app-container { display: flex; width: 95%; max-width: 1000px; height: 85vh; background: #fff; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.15); overflow: hidden; }
+
+        /* Sidebar de Contatos (Esquerda) */
+        .sidebar { width: 320px; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; background: #ffffff; }
+        .sidebar-header { padding: 15px; background: #f0f2f5; font-weight: bold; border-bottom: 1px solid #e0e0e0; }
+        .contacts-list { flex: 1; overflow-y: auto; }
+        .contact-item { padding: 12px 15px; border-bottom: 1px solid #f0f0f0; cursor: pointer; transition: background 0.2s; }
+        .contact-item:hover { background: #f5f5f5; }
+        .contact-item.active { background: #e6f7ff; border-left: 4px solid #1890ff; }
+        .contact-name { font-weight: bold; font-size: 14px; margin-bottom: 4px; color: #333; }
+        .contact-last-msg { font-size: 12px; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        /* Area Principal do Chat (Direita) */
+        .chat-area { flex: 1; display: flex; flex-direction: column; background: #f8f9fa; }
+        .chat-header { padding: 15px; background: #f0f2f5; font-weight: bold; border-bottom: 1px solid #e0e0e0; height: 50px; display: flex; align-items: center; }
+        .messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+        
+        .msg { padding: 8px 14px; border-radius: 8px; max-width: 70%; word-wrap: break-word; font-size: 14px; }
+        .recebida { background: #ffffff; align-self: flex-start; color: #333; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+        .enviada { background: #d9fdd3; color: #111b21; align-self: flex-end; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+
+        /* Form de envio */
+        .form-send { padding: 12px; background: #f0f2f5; display: flex; gap: 10px; border-top: 1px solid #e0e0e0; }
+        input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; outline: none; }
+        button { padding: 10px 20px; background: #00a884; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        button:hover { background: #008f70; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
     </style>
 </head>
 <body>
 
-    <div class="chat-container">
-        <h2>Atendimento WhatsApp</h2>
-        <div id="messages" class="messages"></div>
+    <div class="app-container">
+        <!-- Barra Lateral de Contatos -->
+        <div class="sidebar">
+            <div class="sidebar-header">Conversas</div>
+            <div id="contactsList" class="contacts-list"></div>
+        </div>
 
-        <div class="form-send">
-            <input type="text" id="remoteJid" placeholder="Número do cliente (Ex: 5511999999999)" />
-            <input type="text" id="texto" placeholder="Digite sua mensagem..." />
-            <button onclick="enviar()">Enviar Mensagem</button>
+        <!-- Área de Conversa -->
+        <div class="chat-area">
+            <div id="chatHeader" class="chat-header">Selecione uma conversa ao lado</div>
+            <div id="messages" class="messages"></div>
+
+            <div class="form-send">
+                <input type="hidden" id="remoteJid" />
+                <input type="text" id="texto" placeholder="Digite sua mensagem..." disabled />
+                <button id="btnEnviar" onclick="enviar()" disabled>Enviar</button>
+            </div>
         </div>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
         const socket = io();
+        const contactsListDiv = document.getElementById('contactsList');
         const messagesDiv = document.getElementById('messages');
+        const chatHeader = document.getElementById('chatHeader');
+        const remoteJidInput = document.getElementById('remoteJid');
+        const textoInput = document.getElementById('texto');
+        const btnEnviar = document.getElementById('btnEnviar');
+
+        let clienteAtualJid = null;
+
+        // Desenha a lista de contatos na barra lateral
+        socket.on('lista_contatos', (contatos) => {
+            contactsListDiv.innerHTML = '';
+            contatos.forEach(contato => {
+                const item = document.createElement('div');
+                item.className = `contact-item ${contato.remote_jid === clienteAtualJid ? 'active' : ''}`;
+                
+                const nome = contato.push_name || contato.remote_jid.split('@')[0];
+                item.innerHTML = `
+                    <div class="contact-name">${nome}</div>
+                    <div class="contact-last-msg">${contato.ultima_mensagem}</div>
+                `;
+
+                item.onclick = () => selecionarContato(contato.remote_jid, nome);
+                contactsListDiv.appendChild(item);
+            });
+        });
+
+        // Seleciona um contato e solicita o histórico dele ao servidor
+        function selecionarContato(remoteJid, nome) {
+            clienteAtualJid = remoteJid;
+            remoteJidInput.value = remoteJid;
+            chatHeader.innerText = `Conversando com: ${nome}`;
+            
+            // Ativa o campo de envio de texto
+            textoInput.disabled = false;
+            btnEnviar.disabled = false;
+            textoInput.focus();
+
+            // Atualiza o destaque visual na sidebar
+            document.querySelectorAll('.contact-item').forEach(el => el.classList.remove('active'));
+            
+            // Carrega as mensagens deste cliente
+            socket.emit('carregar_conversa', remoteJid);
+        }
+
+        // Exibe o histórico de conversas do contato selecionado
+        socket.on('historico_conversa', (data) => {
+            if (data.remoteJid === clienteAtualJid) {
+                messagesDiv.innerHTML = '';
+                data.mensagens.forEach(msg => {
+                    const tipo = msg.from_me ? 'enviada' : 'recebida';
+                    adicionarMensagemOnScreen(msg.texto, tipo);
+                });
+            }
+        });
+
+        // Recebe uma mensagem em tempo real
+        socket.on('nova_mensagem', (msg) => {
+            if (msg.remoteJid === clienteAtualJid) {
+                adicionarMensagemOnScreen(msg.text, 'recebida');
+            }
+        });
+
+        // Confirmação de mensagem enviada
+        socket.on('mensagem_enviada', (msg) => {
+            if (msg.remoteJid === clienteAtualJid) {
+                adicionarMensagemOnScreen(msg.text, 'enviada');
+            }
+        });
 
         function adicionarMensagemOnScreen(texto, tipo) {
             const div = document.createElement('div');
@@ -43,41 +140,15 @@
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
 
-        socket.on('nova_mensagem', (msg) => {
-            adicionarMensagemOnScreen(`${msg.pushName}: ${msg.text}`, 'recebida');
-            if (msg.remoteJid) {
-                const numeroLimpo = msg.remoteJid.split('@')[0];
-                document.getElementById('remoteJid').value = numeroLimpo;
-            }
-        });
-
-        socket.on('mensagem_enviada', (msg) => {
-            adicionarMensagemOnScreen(`Você: ${msg.text}`, 'enviada');
-        });
-
         function enviar() {
-            const remoteJid = document.getElementById('remoteJid').value;
-            const text = document.getElementById('texto').value;
+            const remoteJid = remoteJidInput.value;
+            const text = textoInput.value;
 
-            if (!remoteJid || !text) {
-                alert('Preencha o número e a mensagem!');
-                return;
-            }
+            if (!remoteJid || !text) return;
 
             socket.emit('enviar_mensagem', { remoteJid, text });
-            document.getElementById('texto').value = '';
+            textoInput.value = '';
         }
-        // Recebe o histórico de mensagens do banco de dados ao carregar a página
-        socket.on('historico_mensagens', (mensagens) => {
-            messagesDiv.innerHTML = ''; // Limpa a tela antes de preencher
-            mensagens.forEach(msg => {
-                if (msg.from_me) {
-                    adicionarMensagemOnScreen(`Você: ${msg.texto}`, 'enviada');
-                } else {
-                    adicionarMensagemOnScreen(`${msg.push_name}: ${msg.texto}`, 'recebida');
-                }
-            });
-        });
     </script>
 </body>
 </html>
