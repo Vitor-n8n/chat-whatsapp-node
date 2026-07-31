@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Painel de Atendimento WhatsApp</title>
+    <title>Atendimento WhatsApp</title>
     <style>
-        body { font-family: Arial, sans-serif; background: #f4f4f9; margin: 0; padding: 20px; }
+        body { font-family: Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }
         .chat-container { max-width: 600px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 20px; }
-        .messages { height: 350px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; border-radius: 5px; margin-bottom: 15px; }
-        .msg { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 75%; }
-        .recebida { background: #e1ffc7; align-self: flex-start; }
-        .enviada { background: #0084ff; color: #fff; margin-left: auto; text-align: right; }
+        .messages { height: 350px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; border-radius: 5px; margin-bottom: 15px; background: #fafafa; display: flex; flex-direction: column; gap: 8px; }
+        .msg { padding: 8px 12px; border-radius: 8px; max-width: 75%; word-wrap: break-word; }
+        .recebida { background: #e1ffc7; align-self: flex-start; color: #000; }
+        .enviada { background: #0084ff; color: #fff; align-self: flex-end; text-align: right; }
         .form-send { display: flex; flex-direction: column; gap: 10px; }
         input, button { padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
         button { background: #25d366; color: white; border: none; font-weight: bold; cursor: pointer; }
@@ -35,14 +35,22 @@
         const socket = io();
         const messagesDiv = document.getElementById('messages');
 
-        // Recebe mensagem enviada pelo cliente via Webhook
+        function adicionarMensagemOnScreen(texto, tipo) {
+            const div = document.createElement('div');
+            div.className = `msg ${tipo}`;
+            div.innerText = texto;
+            messagesDiv.appendChild(div);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
         socket.on('nova_mensagem', (msg) => {
             adicionarMensagemOnScreen(`${msg.pushName}: ${msg.text}`, 'recebida');
-            // Preenche o campo de número automaticamente para facilitar a resposta
-            document.getElementById('remoteJid').value = msg.remoteJid;
+            if (msg.remoteJid) {
+                const numeroLimpo = msg.remoteJid.split('@')[0];
+                document.getElementById('remoteJid').value = numeroLimpo;
+            }
         });
 
-        // Recebe confirmação da mensagem que o atendente enviou
         socket.on('mensagem_enviada', (msg) => {
             adicionarMensagemOnScreen(`Você: ${msg.text}`, 'enviada');
         });
@@ -56,12 +64,20 @@
                 return;
             }
 
-            // Dispara para o backend via WebSockets
             socket.emit('enviar_mensagem', { remoteJid, text });
-            
-            // Limpa o campo de texto
             document.getElementById('texto').value = '';
         }
+        // Recebe o histórico de mensagens do banco de dados ao carregar a página
+        socket.on('historico_mensagens', (mensagens) => {
+            messagesDiv.innerHTML = ''; // Limpa a tela antes de preencher
+            mensagens.forEach(msg => {
+                if (msg.from_me) {
+                    adicionarMensagemOnScreen(`Você: ${msg.texto}`, 'enviada');
+                } else {
+                    adicionarMensagemOnScreen(`${msg.push_name}: ${msg.texto}`, 'recebida');
+                }
+            });
+        });
     </script>
 </body>
 </html>
