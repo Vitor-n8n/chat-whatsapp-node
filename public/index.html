@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Meu Chat Próprio</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #ece5dd; padding: 20px; }
+        #chat-box { width: 400px; height: 500px; background: white; border-radius: 8px; padding: 15px; overflow-y: auto; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        .balao { background: #dcf8c6; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; width: fit-content; max-width: 80%; }
+        .cliente { font-weight: bold; color: #075e54; font-size: 12px; }
+        .texto { font-size: 14px; margin-top: 3px; }
+    </style>
+</head>
+<body>
+
+    <h2>Painel do Atendente</h2>
+    <div id="chat-box"></div>
+
+    <!-- Carrega a biblioteca cliente do Socket.io -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        // Conecta no servidor WebSocket
+        const socket = io();
+
+        // Escuta o evento 'nova_mensagem' que o server.js envia
+        socket.on('nova_mensagem', function(dados) {
+            const chatBox = document.getElementById('chat-box');
+
+            // Cria o balãozinho verde na tela
+            const novoBalao = document.createElement('div');
+            novoBalao.className = 'balao';
+            novoBalao.innerHTML = `
+                <div class="cliente">${dados.cliente || 'Desconhecido'}</div>
+                <div class="texto">${dados.texto || dados.msg || 'Sem texto'}</div>
+            `;
+
+            // Adiciona no chat e rola para baixo
+            chatBox.appendChild(novoBalao);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        });
+    </script>
+</body>
+</html>
