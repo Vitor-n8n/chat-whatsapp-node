@@ -48,6 +48,6 @@ io.on('connection', (socket) => {
 });
 
 // Liga o servidor
-server.listen(3000, () => {
-    console.log('Servidor de Chat rodando com WebSockets na porta 3000!');
+server.listen(3002, () => {
+    console.log('Servidor de Chat rodando com WebSockets na porta 3002!');
 });
